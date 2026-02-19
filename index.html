@@ -2,8 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Digital Fog Hourglass</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Hourglass">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#000000">
+  <title>Hourglass</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     body, html {
@@ -14,6 +19,9 @@
       touch-action: none;
       -webkit-tap-highlight-color: transparent;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+      /* Extend into notch/dynamic island area */
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
     }
     #canvas-container {
       position: relative;
@@ -21,48 +29,31 @@
       background: #000000;
     }
     canvas {
-      display: block;
-      position: absolute;
+      display: block; position: absolute;
       top: 0; left: 0;
       background: #000000;
     }
-    /* Time-set display (drag to set) */
     #time-display {
       position: absolute;
-      color: white;
-      font-size: 2.2rem;
-      font-weight: 200;
-      letter-spacing: 1px;
-      opacity: 0;
-      transition: opacity 0.35s ease;
+      color: white; font-size: 2.2rem; font-weight: 200; letter-spacing: 1px;
+      opacity: 0; transition: opacity 0.35s ease;
       pointer-events: none;
       text-shadow: 0 0 20px rgba(255,255,255,0.5);
-      z-index: 20;
-      text-align: center;
-      left: 50%;
-      transform: translateX(-50%);
+      z-index: 20; text-align: center;
+      left: 50%; transform: translateX(-50%);
     }
     #time-display.visible { opacity: 0.95; }
-
-    /* Progress display (hover bottom half during run) */
     #progress-display {
       position: absolute;
-      color: white;
-      font-size: 1.4rem;
-      font-weight: 300;
-      letter-spacing: 0.5px;
-      opacity: 0;
-      transition: opacity 0.3s ease;
+      color: white; font-size: 1.35rem; font-weight: 300; letter-spacing: 0.5px;
+      opacity: 0; transition: opacity 0.25s ease;
       pointer-events: none;
       text-shadow: 0 0 16px rgba(255,255,255,0.45);
-      z-index: 20;
-      text-align: center;
-      left: 50%;
-      transform: translateX(-50%);
+      z-index: 20; text-align: center;
+      left: 50%; transform: translateX(-50%);
       white-space: nowrap;
     }
-    #progress-display.visible { opacity: 0.90; }
-
+    #progress-display.visible { opacity: 0.88; }
     #interaction-layer {
       position: absolute; top: 0; left: 0;
       width: 100%; height: 100%; z-index: 10;
@@ -72,18 +63,18 @@
 <body>
 <div id="canvas-container">
   <div id="time-display">10s</div>
-  <div id="progress-display">0s of 10s</div>
+  <div id="progress-display"></div>
   <canvas id="glassCanvas"></canvas>
   <div id="interaction-layer"></div>
 </div>
 <script>
-const canvas          = document.getElementById('glassCanvas');
-const ctx             = canvas.getContext('2d');
+const canvas           = document.getElementById('glassCanvas');
+const ctx              = canvas.getContext('2d');
 const interactionLayer = document.getElementById('interaction-layer');
-const timeDisplay     = document.getElementById('time-display');
-const progressDisplay = document.getElementById('progress-display');
+const timeDisplay      = document.getElementById('time-display');
+const progressDisplay  = document.getElementById('progress-display');
 
-const MIN_TIME = 300;
+const MIN_TIME = 10;
 const MAX_TIME = 3600;
 
 let width, height, cx, cy;
@@ -91,7 +82,7 @@ let S = {};
 
 let isDragging          = false;
 let isRunning           = false;
-let isHoveringBottom    = false;
+let isShowingProgress   = false;
 let duration            = 60;
 let timeLeft            = 0;
 let topFillLevel        = 0;
@@ -101,7 +92,10 @@ let lastTime            = 0;
 
 let topParticles    = [];
 let bottomParticles = [];
-let flowParticles   = []; // shotgun particles that travel top-to-bottom through gap
+let flowParticles   = [];
+
+// Max flow particles cap — prevents accumulation/lag
+const MAX_FLOW = 120;
 
 function init() {
   resize();
@@ -126,9 +120,13 @@ function resize() {
   const bendH  = height * 0.16;
   const gap    = height * 0.019;
 
+  // Neck break — how far inward from each tip the edge stroke stops.
+  // Larger value = bigger transparent gap at the neck center.
+  const neckBreak = neckHW * 0.55; // tips retract this much from the drawn endpoint
+
   S = {
     left: 0, right: width, top: 0, bottom: height,
-    cx, cy, r, neckHW, bendH, gap,
+    cx, cy, r, neckHW, bendH, gap, neckBreak,
     topShapeBottom:  cy - gap,
     bottomShapeTop:  cy + gap,
     topBendStart:    cy - gap - bendH,
@@ -136,7 +134,6 @@ function resize() {
   };
 
   timeDisplay.style.top    = ((cy - gap) * 0.38) + 'px';
-  // Position progress display in the lower half center
   progressDisplay.style.top = (cy + gap + (height - cy - gap) * 0.45) + 'px';
 }
 window.addEventListener('resize', resize);
@@ -154,8 +151,6 @@ function createParticles() {
   }));
 }
 
-// ── TIME FORMATTING ───────────────────────────────────────────────────────
-
 function formatTime(s) {
   s = Math.max(0, Math.round(s));
   if (s < 60) return s + "s";
@@ -165,38 +160,44 @@ function formatTime(s) {
 }
 
 function formatProgress() {
-  const elapsed = duration - timeLeft;
+  const elapsed = Math.max(0, duration - timeLeft);
   return formatTime(elapsed) + " of " + formatTime(duration);
 }
 
 // ── PATH BUILDERS ─────────────────────────────────────────────────────────
-// IMPORTANT: The neck edge (horizontal line between the two tips) is NOT
-// drawn. We only draw the outer perimeter + the two curved arms.
-// This leaves the neck center open / transparent.
+// Strategy: straight outer edges get the full LED glow.
+// Neck arm curves are drawn SEPARATELY with a fading gradient stroke.
+// The two are never combined, so the glow can't bleed into the neck tips.
 
-// Top half — outer boundary only (no bottom closing segment)
-function buildTopOuterPath() {
-  const { left, right, top, cx, r, neckHW, topShapeBottom, topBendStart } = S;
+// Top half — STRAIGHT edges only (top, right side to bendStart, left side to bendStart, corners)
+// No neck arms at all.
+function buildTopStraightPath() {
+  const { left, right, top, cx, r, topBendStart } = S;
   ctx.beginPath();
-  // TL iPhone corner → top edge → TR corner
   ctx.moveTo(left + r, top);
   ctx.lineTo(right - r, top);
   ctx.arcTo(right, top, right, top + r, r);
-  // Right side straight to bend
   ctx.lineTo(right, topBendStart);
-  // Right arm curves inward to right neck tip — STOPS HERE (no line across)
-  ctx.bezierCurveTo(right, topShapeBottom, cx + neckHW, topShapeBottom, cx + neckHW, topShapeBottom);
-  // PATH BREAK — move to left neck tip without drawing the neck segment
-  ctx.moveTo(cx - neckHW, topShapeBottom);
-  // Left arm curves back out to left side
-  ctx.bezierCurveTo(cx - neckHW, topShapeBottom, left, topShapeBottom, left, topBendStart);
-  // Left side straight to TL corner
+  // jump across — no arms drawn
+  ctx.moveTo(left, topBendStart);
   ctx.lineTo(left, top + r);
   ctx.arcTo(left, top, left + r, top, r);
-  // Don't closePath — we want an open shape for stroking
+  ctx.lineTo(right - r, top); // close top visually
 }
 
-// Top half — closed path used only for clipping/filling
+// Bottom half — STRAIGHT edges only
+function buildBottomStraightPath() {
+  const { left, right, bottom, cx, r, bottomBendStart } = S;
+  ctx.beginPath();
+  ctx.moveTo(right, bottomBendStart);
+  ctx.lineTo(right, bottom - r);
+  ctx.arcTo(right, bottom, right - r, bottom, r);
+  ctx.lineTo(left + r, bottom);
+  ctx.arcTo(left, bottom, left, bottom - r, r);
+  ctx.lineTo(left, bottomBendStart);
+}
+
+// Top half closed — for clipping/filling only
 function buildTopHalfPath() {
   const { left, right, top, cx, r, neckHW, topShapeBottom, topBendStart } = S;
   ctx.beginPath();
@@ -212,28 +213,7 @@ function buildTopHalfPath() {
   ctx.closePath();
 }
 
-// Bottom half — outer boundary only (no top closing segment)
-function buildBottomOuterPath() {
-  const { left, right, bottom, cx, r, neckHW, bottomShapeTop, bottomBendStart } = S;
-  ctx.beginPath();
-  // Right neck tip → curves out to right side
-  ctx.moveTo(cx + neckHW, bottomShapeTop);
-  ctx.bezierCurveTo(cx + neckHW, bottomShapeTop, right, bottomShapeTop, right, bottomBendStart);
-  // Right side straight to BR corner
-  ctx.lineTo(right, bottom - r);
-  ctx.arcTo(right, bottom, right - r, bottom, r);
-  // Bottom edge
-  ctx.lineTo(left + r, bottom);
-  // BL corner
-  ctx.arcTo(left, bottom, left, bottom - r, r);
-  // Left side straight up to bend
-  ctx.lineTo(left, bottomBendStart);
-  // Left arm curves inward to left neck tip — STOPS HERE
-  ctx.bezierCurveTo(left, bottomShapeTop, cx - neckHW, bottomShapeTop, cx - neckHW, bottomShapeTop);
-  // PATH BREAK — don't draw the top closing segment
-}
-
-// Bottom half — closed for clipping/filling
+// Bottom half closed — for clipping/filling
 function buildBottomHalfPath() {
   const { left, right, bottom, cx, r, neckHW, bottomShapeTop, bottomBendStart } = S;
   ctx.beginPath();
@@ -254,144 +234,129 @@ function buildBottomHalfPath() {
 function drawBackground() {
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
-  ctx.save();
-  buildTopHalfPath();
-  ctx.fillStyle = '#000000';
-  ctx.fill();
-  ctx.restore();
-  ctx.save();
-  buildBottomHalfPath();
-  ctx.fillStyle = '#000000';
-  ctx.fill();
-  ctx.restore();
+  ctx.save(); buildTopHalfPath();    ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
+  ctx.save(); buildBottomHalfPath(); ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
 }
 
 // ── GLASS EDGES ───────────────────────────────────────────────────────────
 
+// Full LED glow — only called on straight edge paths (never neck arms)
 function strokeGlowEdge(pathFn) {
   ctx.save();
-  // Wide outer bloom
   pathFn();
-  ctx.shadowBlur  = 80;
-  ctx.shadowColor = 'rgba(180,220,255,0.50)';
+  ctx.shadowBlur  = 100;
+  ctx.shadowColor = 'rgba(160,210,255,0.60)';
   ctx.strokeStyle = 'rgba(0,0,0,0)';
-  ctx.lineWidth   = 2;
+  ctx.lineWidth   = 3;
   ctx.stroke();
-  // Medium halo
+
   pathFn();
-  ctx.shadowBlur  = 42;
-  ctx.shadowColor = 'rgba(255,255,255,0.75)';
+  ctx.shadowBlur  = 55;
+  ctx.shadowColor = 'rgba(255,255,255,0.85)';
   ctx.strokeStyle = 'rgba(0,0,0,0)';
-  ctx.lineWidth   = 2;
+  ctx.lineWidth   = 2.5;
   ctx.stroke();
-  // Bright crisp line
+
   pathFn();
-  ctx.shadowBlur  = 14;
+  ctx.shadowBlur  = 18;
   ctx.shadowColor = 'rgba(255,255,255,1.0)';
-  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
-  ctx.lineWidth   = 1.6;
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth   = 1.8;
   ctx.stroke();
-  // Hot white core
+
   pathFn();
-  ctx.shadowBlur  = 3;
+  ctx.shadowBlur  = 4;
   ctx.shadowColor = 'rgba(255,255,255,1.0)';
   ctx.strokeStyle = 'rgba(255,255,255,1.0)';
-  ctx.lineWidth   = 0.7;
+  ctx.lineWidth   = 0.8;
   ctx.stroke();
+
   ctx.shadowBlur = 0;
   ctx.restore();
 }
 
-// Fade neck curves: overdraw the arm curves with gradient fading to transparent at tip
-
-function drawNeckFade(side) {
-  const isTop = side === 'top';
-  const { left, right, cx, neckHW } = S;
-  const bendStart = isTop ? S.topBendStart : S.bottomBendStart;
-  const neckY     = isTop ? S.topShapeBottom : S.bottomShapeTop;
-
+// Draw one neck arm with a gradient stroke fading from full glow at bendStart → invisible at neckY.
+// Uses multiple passes so the glow itself also fades, not just the line opacity.
+function drawNeckArm(x0, y0, cpX, cpY, x1, y1, glowStrength) {
+  // glowStrength 0..1 — lets bend-start end match the straight edge brightness
   ctx.save();
   ctx.lineCap = 'round';
 
-  // Helper to draw one arm
-  function drawArm(fromX, tipX) {
+  // We approximate the bezier with a linear gradient from (x0,y0) to (x1,y1)
+  const grLine = ctx.createLinearGradient(x0, y0, x1, y1);
+  grLine.addColorStop(0,    `rgba(255,255,255,${0.95 * glowStrength})`);
+  grLine.addColorStop(0.35, `rgba(255,255,255,${0.55 * glowStrength})`);
+  grLine.addColorStop(0.70, `rgba(255,255,255,${0.18 * glowStrength})`);
+  grLine.addColorStop(1,    'rgba(255,255,255,0.00)');
 
-    // Multi-pass fade with shrinking width
-    for (let i = 0; i < 3; i++) {
-      const t = i / 3;
+  const grGlow = ctx.createLinearGradient(x0, y0, x1, y1);
+  grGlow.addColorStop(0,    `rgba(255,255,255,${0.80 * glowStrength})`);
+  grGlow.addColorStop(0.35, `rgba(255,255,255,${0.35 * glowStrength})`);
+  grGlow.addColorStop(0.70, `rgba(255,255,255,${0.08 * glowStrength})`);
+  grGlow.addColorStop(1,    'rgba(255,255,255,0.00)');
 
-      const grad = ctx.createLinearGradient(fromX, bendStart, tipX, neckY);
-      grad.addColorStop(0, `rgba(255,255,255,${0.95 - t * 0.5})`);
-      grad.addColorStop(0.7, `rgba(255,255,255,${0.25 - t * 0.2})`);
-      grad.addColorStop(1, 'rgba(255,255,255,0)');
+  // Pass 1 — soft glow halo (medium width)
+  ctx.shadowBlur  = 30;
+  ctx.shadowColor = `rgba(200,230,255,${0.50 * glowStrength})`;
+  ctx.strokeStyle = grGlow;
+  ctx.lineWidth   = 4;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.bezierCurveTo(cpX, cpY, x1, y1, x1, y1);
+  ctx.stroke();
 
-      ctx.lineWidth   = 2.2 - i * 0.7;   // progressively thinner
-      ctx.shadowBlur  = 16 - i * 5;      // progressively softer glow
-      ctx.shadowColor = 'rgba(255,255,255,0.6)';
-      ctx.strokeStyle = grad;
+  // Pass 2 — crisp bright line
+  ctx.shadowBlur  = 12;
+  ctx.shadowColor = `rgba(255,255,255,${0.80 * glowStrength})`;
+  ctx.strokeStyle = grLine;
+  ctx.lineWidth   = 1.6;
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.bezierCurveTo(cpX, cpY, x1, y1, x1, y1);
+  ctx.stroke();
 
-      ctx.beginPath();
-      ctx.moveTo(fromX, bendStart);
-      ctx.bezierCurveTo(fromX, neckY, tipX, neckY, tipX, neckY);
-      ctx.stroke();
-    }
-
-    // 🔥 Soft eraser at the tip to remove leftover glow
-    const erase = ctx.createRadialGradient(tipX, neckY, 0, tipX, neckY, 30);
-    erase.addColorStop(0, 'rgba(0,0,0,0.8)');
-    erase.addColorStop(1, 'rgba(0,0,0,0)');
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.fillStyle = erase;
-    ctx.beginPath();
-    ctx.arc(tipX, neckY, 30, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalCompositeOperation = 'source-over';
-  }
-
-  // Right arm
-  drawArm(right, cx + neckHW);
-
-  // Left arm
-  drawArm(left, cx - neckHW);
-
+  ctx.shadowBlur = 0;
   ctx.restore();
 }
 
+// Draw all four neck arms (2 per half) with fading glow
+function drawNeckArms() {
+  const { left, right, cx, neckHW, neckBreak } = S;
 
+  // Top half arms — fade toward topShapeBottom
+  const tY   = S.topShapeBottom;
+  const tEnd = S.topBendStart;
+  const tBRx = cx + neckHW + neckBreak; // right arm tip X
+  const tBLx = cx - neckHW - neckBreak; // left arm tip X
+
+  // Top-right arm: from (right, topBendStart) bezier to (tBRx, tY)
+  drawNeckArm(right, tEnd,  right, tY,  tBRx, tY,  1.0);
+  // Top-left arm: from (left, topBendStart) bezier to (tBLx, tY)
+  drawNeckArm(left,  tEnd,  left,  tY,  tBLx, tY,  1.0);
+
+  // Bottom half arms — fade toward bottomShapeTop
+  const bY   = S.bottomShapeTop;
+  const bEnd = S.bottomBendStart;
+  const bBRx = cx + neckHW + neckBreak;
+  const bBLx = cx - neckHW - neckBreak;
+
+  // Bottom-right arm: bright at (right, bottomBendStart), fades toward tip (bBRx, bY)
+  drawNeckArm(right, bEnd,  right, bY,  bBRx, bY,  1.0);
+  // Bottom-left arm: bright at (left, bottomBendStart), fades toward tip (bBLx, bY)
+  drawNeckArm(left,  bEnd,  left,  bY,  bBLx, bY,  1.0);
+}
 
 function drawGlass() {
-  const { left, right } = S;
+  // 1. Full LED glow on straight edges only
+  strokeGlowEdge(buildTopStraightPath);
+  strokeGlowEdge(buildBottomStraightPath);
 
-  // Use the OUTER (broken-neck) path for stroking — no horizontal segment
-  strokeGlowEdge(buildTopOuterPath);
-  strokeGlowEdge(buildBottomOuterPath);
-
-  // Overdraw neck arms with fade to erase glow at tips
-  drawNeckFade('top');
-  drawNeckFade('bottom');
-
-  // Interior glass depth gradient
-  ctx.save();
-  buildTopHalfPath(); ctx.clip();
-  const gT = ctx.createLinearGradient(left, 0, right, 0);
-  gT.addColorStop(0, 'rgba(255,255,255,0.05)'); gT.addColorStop(0.04, 'rgba(255,255,255,0.12)');
-  gT.addColorStop(0.5, 'rgba(255,255,255,0.00)'); gT.addColorStop(0.96, 'rgba(255,255,255,0.10)');
-  gT.addColorStop(1, 'rgba(255,255,255,0.04)');
-  ctx.fillStyle = gT; ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  buildBottomHalfPath(); ctx.clip();
-  const gB = ctx.createLinearGradient(left, 0, right, 0);
-  gB.addColorStop(0, 'rgba(255,255,255,0.05)'); gB.addColorStop(0.04, 'rgba(255,255,255,0.12)');
-  gB.addColorStop(0.5, 'rgba(255,255,255,0.00)'); gB.addColorStop(0.96, 'rgba(255,255,255,0.10)');
-  gB.addColorStop(1, 'rgba(255,255,255,0.04)');
-  ctx.fillStyle = gB; ctx.fill();
-  ctx.restore();
+  // 2. Neck arms with smooth fade — no interior fills, no reflections
+  drawNeckArms();
+  // Background is pure #000000 — no gradients, no reflections, no transparency
 }
 
-// ── FOG / SNOW ────────────────────────────────────────────────────────────
+// ── FOG ───────────────────────────────────────────────────────────────────
 
 function drawTopFog(deltaTime) {
   if (topFillLevel <= 0) return;
@@ -421,6 +386,7 @@ function drawBottomFog(deltaTime) {
   const fillH = (bottom - bottomShapeTop) * 0.95 * bottomFillLevel;
   const spanX = (right - left) * 0.46;
   bottomParticles.forEach((p, i) => {
+    // Only advance phase if actually visible — prevents lag from stale updates
     p.phase += deltaTime * 0.0007;
     const x     = cx + Math.sin(p.phase + i * 0.65) * spanX;
     const baseY = bottom - (i / bottomParticles.length) * fillH;
@@ -433,63 +399,96 @@ function drawBottomFog(deltaTime) {
   ctx.restore();
 }
 
-// Spawn shotgun-blast particles from the neck mouth.
-// They fire in all directions (but biased downward) and travel
-// all the way to the bottom of the screen — no clipping.
+// ── FLOW PARTICLES ────────────────────────────────────────────────────────
+// Particle count and size scale inversely with duration:
+//   short timer → many fast small particles (rapid pour)
+//   long timer  → fewer slow larger particles (slow trickle)
+
 function spawnFlowParticles() {
+  if (flowParticles.length >= MAX_FLOW) return;
+
   const { neckHW, topShapeBottom } = S;
-  for (let k = 0; k < 4; k++) {
-    // Random angle: full 360° but weighted downward
-    // Use a cone centered on straight-down (270° / -π/2), spread ±80°
-    const spread = (Math.random() - 0.5) * (Math.PI * 1.4); // ±126°
-    const angle  = Math.PI / 2 + spread;                    // base = downward
-    const speed  = Math.random() * 3.5 + 1.2;
+
+  const t = Math.max(0, Math.min(1, (duration - MIN_TIME) / (MAX_TIME - MIN_TIME)));
+  const spawnCount = Math.round(5 - t * 4); // 5 at 10s → 1 at 60m
+  const baseSize   = 5 + t * 14;            // 5px at 10s → 19px at 60m
+  const baseSpeed  = 7 - t * 3.5;           // 7 at 10s → 3.5 at 60m
+
+  for (let k = 0; k < spawnCount; k++) {
+    // True shotgun: ±150° cone around downward direction
+    const spread = (Math.random() - 0.5) * Math.PI * 1.667;
+    const angle  = Math.PI / 2 + spread;
+    const speed  = baseSpeed * (0.4 + Math.random() * 1.2);
+    const sz     = baseSize * (0.6 + Math.random() * 0.9);
+    const decay  = 0.004 + (1 - t) * 0.010;
+
     flowParticles.push({
-      x:     cx + (Math.random() - 0.5) * neckHW * 1.8,
-      y:     topShapeBottom + 2,
-      vx:    Math.cos(angle) * speed,
-      vy:    Math.sin(angle) * speed,
-      size:  Math.random() * 14 + 7,
-      life:  1.0,
-      decay: 0.004 + Math.random() * 0.005,  // slow decay — they travel far
+      x:    cx + (Math.random() - 0.5) * neckHW * 1.4,
+      y:    topShapeBottom + 1,
+      vx:   Math.cos(angle) * speed,
+      vy:   Math.sin(angle) * speed,
+      size: sz,
+      life: 1.0,
+      decay,
     });
   }
 }
 
 function drawFlowParticles() {
-  // NO clipping — particles travel freely through the gap and into the bottom half
-  gapParticles_ctx: {
-    flowParticles.forEach(p => {
-      p.x   += p.vx;
-      p.y   += p.vy;
-      p.vx  *= 0.985;
-      p.vy  += 0.06;   // slight gravity
-      p.life -= p.decay;
-      const op = Math.max(0, p.life * 0.5);
-      const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
-      rg.addColorStop(0, `rgba(255,255,255,${op})`);
-      rg.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = rg;
-      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
-    });
+  for (let i = flowParticles.length - 1; i >= 0; i--) {
+    const p = flowParticles[i];
+    p.x   += p.vx;
+    p.y   += p.vy;
+    p.vx  *= 0.997;  // almost no horizontal damping — particles keep flying sideways
+    p.vy  += 0.10;   // gravity
+    p.life -= p.decay;
+
+    if (p.life <= 0 || p.y > height + 20) {
+      flowParticles.splice(i, 1);
+      continue;
+    }
+
+    const op = Math.max(0, p.life * 0.55);
+    const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+    rg.addColorStop(0, `rgba(255,255,255,${op})`);
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
   }
-  flowParticles = flowParticles.filter(p => p.life > 0 && p.y < height + 20);
 }
 
 // ── INTERACTION ───────────────────────────────────────────────────────────
 
+function showProgress() {
+  progressDisplay.textContent = formatProgress();
+  progressDisplay.classList.add('visible');
+  isShowingProgress = true;
+}
+
+function hideProgress() {
+  progressDisplay.classList.remove('visible');
+  isShowingProgress = false;
+}
+
 function handleStart(e) {
-  const y = e.touches ? e.touches[0].clientY : e.clientY;
-  if (y < cy) {
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+  // Show progress on touch/click in bottom half while running
+  if (isRunning && clientY > cy) {
+    showProgress();
+    return;
+  }
+
+  // Drag to set time in top half
+  if (clientY < cy) {
     isDragging = true;
     isRunning  = false;
+    hideProgress();
     timeDisplay.classList.add('visible');
   }
 }
 
 function handleMove(e) {
-  if (!isDragging && !isRunning) return;
-
   const clientY = e.touches ? e.touches[0].clientY : e.clientY;
 
   if (isDragging) {
@@ -503,68 +502,52 @@ function handleMove(e) {
     return;
   }
 
-  // During run — detect hover on bottom half for progress display
-  if (isRunning) {
-    const inBottom = clientY > cy;
-    if (inBottom !== isHoveringBottom) {
-      isHoveringBottom = inBottom;
-      if (inBottom) {
-        progressDisplay.textContent = formatProgress();
-        progressDisplay.classList.add('visible');
-      } else {
-        progressDisplay.classList.remove('visible');
-      }
-    }
-    if (isHoveringBottom) {
-      progressDisplay.textContent = formatProgress();
+  // Mouse hover: show/hide progress based on position
+  if (!e.touches && isRunning) {
+    if (clientY > cy) {
+      if (!isShowingProgress) showProgress();
+      else progressDisplay.textContent = formatProgress();
+    } else {
+      // Mouse moved out of bottom half → hide immediately
+      hideProgress();
     }
   }
 }
 
-function handleEnd() {
+function handleEnd(e) {
   if (isDragging) {
     isDragging          = false;
     isRunning           = true;
     initialTopFillLevel = topFillLevel;
     timeDisplay.classList.remove('visible');
     lastTime = performance.now();
+    return;
   }
-}
-
-function handleLeave() {
-  if (isHoveringBottom) {
-    isHoveringBottom = false;
-    progressDisplay.classList.remove('visible');
-  }
+  // Touch/click released → always hide progress
+  hideProgress();
 }
 
 interactionLayer.addEventListener('mousedown', handleStart);
 window.addEventListener('mousemove', handleMove);
 window.addEventListener('mouseup', handleEnd);
-window.addEventListener('mouseleave', handleLeave);
+// Hide when mouse leaves the window entirely
+window.addEventListener('mouseleave', hideProgress);
+// Hide when mouse enters top half (belt-and-suspenders)
+canvas.addEventListener('mousemove', e => {
+  if (e.clientY <= cy && isShowingProgress) hideProgress();
+});
 interactionLayer.addEventListener('touchstart', handleStart, { passive: false });
 window.addEventListener('touchmove', e => { e.preventDefault(); handleMove(e); }, { passive: false });
+// touchend ALWAYS hides progress
 window.addEventListener('touchend', e => {
-  handleEnd();
-  // Hide progress on touch end
-  isHoveringBottom = false;
-  progressDisplay.classList.remove('visible');
+  handleEnd(e);
+  hideProgress();
 });
-
-// Touch hold on bottom half shows progress
-interactionLayer.addEventListener('touchstart', e => {
-  const y = e.touches[0].clientY;
-  if (isRunning && y > cy) {
-    isHoveringBottom = true;
-    progressDisplay.textContent = formatProgress();
-    progressDisplay.classList.add('visible');
-  }
-}, { passive: false });
 
 // ── ANIMATION LOOP ────────────────────────────────────────────────────────
 
 function animate(now) {
-  const deltaTime = now - (lastTime || now);
+  const deltaTime = Math.min(now - (lastTime || now), 50); // cap at 50ms to avoid jumps
   lastTime = now;
 
   if (isRunning && timeLeft > 0) {
@@ -577,31 +560,49 @@ function animate(now) {
       isRunning    = false;
       timeLeft     = 0;
       topFillLevel = 0;
-      progressDisplay.classList.remove('visible');
+      hideProgress();
     }
     if (topFillLevel > 0) spawnFlowParticles();
   }
 
-  // ── 1. Pure black ─────────────────────────────────────────────────
+  // ── Pure black
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
   ctx.save(); buildTopHalfPath();    ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
   ctx.save(); buildBottomHalfPath(); ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
 
-  // ── 2. Fog inside bulbs ───────────────────────────────────────────
+  // ── Fog
   drawTopFog(deltaTime);
   drawBottomFog(deltaTime);
 
-  // ── 3. Flow particles — unclipped, travel full height ────────────
+  // ── Flow particles (unclipped)
   drawFlowParticles();
 
-  // ── 4. Glass edges on top ─────────────────────────────────────────
+  // ── Glass edges
   drawGlass();
 
   requestAnimationFrame(animate);
 }
 
 init();
+
+// ── WAKE LOCK — keep screen on ────────────────────────────────────────────
+let wakeLock = null;
+
+async function requestWakeLock() {
+  try {
+    if ('wakeLock' in navigator) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (e) { /* silently ignore if not supported */ }
+}
+
+// Re-acquire wake lock when tab becomes visible again
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock();
+});
+
+requestWakeLock();
 </script>
 </body>
 </html>

@@ -5,12 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Digital Fog Hourglass</title>
   <style>
+    *, *::before, *::after { box-sizing: border-box; }
     body, html {
       margin: 0; padding: 0;
       width: 100%; height: 100%;
-      background-color: #000;
+      background: #000000;
       overflow: hidden;
-      display: flex; justify-content: center; align-items: center;
       touch-action: none;
       -webkit-tap-highlight-color: transparent;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
@@ -18,10 +18,15 @@
     #canvas-container {
       position: relative;
       width: 100vw; height: 100vh;
-      background: #000;
-      display: flex; justify-content: center; align-items: center;
+      background: #000000;
     }
-    canvas { display: block; }
+    canvas {
+      display: block;
+      position: absolute;
+      top: 0; left: 0;
+      background: #000000;
+    }
+    /* Time-set display (drag to set) */
     #time-display {
       position: absolute;
       color: white;
@@ -29,13 +34,35 @@
       font-weight: 200;
       letter-spacing: 1px;
       opacity: 0;
-      transition: opacity 0.4s ease, transform 0.4s ease;
+      transition: opacity 0.35s ease;
       pointer-events: none;
-      text-shadow: 0 0 20px rgba(255,255,255,0.4);
+      text-shadow: 0 0 20px rgba(255,255,255,0.5);
       z-index: 20;
       text-align: center;
+      left: 50%;
+      transform: translateX(-50%);
     }
-    #time-display.visible { opacity: 0.9; }
+    #time-display.visible { opacity: 0.95; }
+
+    /* Progress display (hover bottom half during run) */
+    #progress-display {
+      position: absolute;
+      color: white;
+      font-size: 1.4rem;
+      font-weight: 300;
+      letter-spacing: 0.5px;
+      opacity: 0;
+      transition: opacity 0.3s ease;
+      pointer-events: none;
+      text-shadow: 0 0 16px rgba(255,255,255,0.45);
+      z-index: 20;
+      text-align: center;
+      left: 50%;
+      transform: translateX(-50%);
+      white-space: nowrap;
+    }
+    #progress-display.visible { opacity: 0.90; }
+
     #interaction-layer {
       position: absolute; top: 0; left: 0;
       width: 100%; height: 100%; z-index: 10;
@@ -45,30 +72,36 @@
 <body>
 <div id="canvas-container">
   <div id="time-display">10s</div>
+  <div id="progress-display">0s of 10s</div>
   <canvas id="glassCanvas"></canvas>
   <div id="interaction-layer"></div>
 </div>
 <script>
-const canvas = document.getElementById('glassCanvas');
-const ctx = canvas.getContext('2d');
+const canvas          = document.getElementById('glassCanvas');
+const ctx             = canvas.getContext('2d');
 const interactionLayer = document.getElementById('interaction-layer');
-const timeDisplay = document.getElementById('time-display');
+const timeDisplay     = document.getElementById('time-display');
+const progressDisplay = document.getElementById('progress-display');
 
 const MIN_TIME = 10;
 const MAX_TIME = 3600;
 
-let width, height, centerX, centerY, glassWidth, glassHeight;
-let isDragging = false;
-let isRunning = false;
-let duration = 60;
-let timeLeft = 0;
-let topFillLevel = 0.3;
-let initialTopFillLevel = 0.3;
-let bottomFillLevel = 0;
-let lastTime = 0;
-let topParticles = [];
+let width, height, cx, cy;
+let S = {};
+
+let isDragging          = false;
+let isRunning           = false;
+let isHoveringBottom    = false;
+let duration            = 60;
+let timeLeft            = 0;
+let topFillLevel        = 0;
+let initialTopFillLevel = 0;
+let bottomFillLevel     = 0;
+let lastTime            = 0;
+
+let topParticles    = [];
 let bottomParticles = [];
-let sprayParticles = [];
+let flowParticles   = []; // shotgun particles that travel top-to-bottom through gap
 
 function init() {
   resize();
@@ -77,278 +110,440 @@ function init() {
 }
 
 function resize() {
-  width = window.innerWidth;
+  width  = window.innerWidth;
   height = window.innerHeight;
   const dpr = window.devicePixelRatio || 1;
-  const containerPadding = 100;
-  glassHeight = Math.min(height - containerPadding, 500);
-  glassWidth = glassHeight * 0.65;
-  canvas.width = width * dpr;
+  canvas.width  = width  * dpr;
   canvas.height = height * dpr;
-  canvas.style.width = width + 'px';
+  canvas.style.width  = width  + 'px';
   canvas.style.height = height + 'px';
   ctx.scale(dpr, dpr);
-  centerX = width / 2;
-  centerY = height / 2;
-  timeDisplay.style.top = (centerY - glassHeight / 4 - 20) + 'px';
-}
+  cx = width  / 2;
+  cy = height / 2;
 
+  const r      = Math.min(44, width * 0.115);
+  const neckHW = width * 0.10;
+  const bendH  = height * 0.16;
+  const gap    = height * 0.019;
+
+  S = {
+    left: 0, right: width, top: 0, bottom: height,
+    cx, cy, r, neckHW, bendH, gap,
+    topShapeBottom:  cy - gap,
+    bottomShapeTop:  cy + gap,
+    topBendStart:    cy - gap - bendH,
+    bottomBendStart: cy + gap + bendH,
+  };
+
+  timeDisplay.style.top    = ((cy - gap) * 0.38) + 'px';
+  // Position progress display in the lower half center
+  progressDisplay.style.top = (cy + gap + (height - cy - gap) * 0.45) + 'px';
+}
 window.addEventListener('resize', resize);
 
 function createParticles() {
-  topParticles = Array.from({ length: 150 }, () => ({
-    x: (Math.random() - 0.5) * 100,
-    y: (Math.random() - 0.5) * 100,
-    size: Math.random() * 25 + 20,
-    opacity: Math.random() * 0.35 + 0.25,
-    phase: Math.random() * Math.PI * 2
+  topParticles = Array.from({ length: 160 }, () => ({
+    size:    Math.random() * 35 + 24,
+    opacity: Math.random() * 0.38 + 0.28,
+    phase:   Math.random() * Math.PI * 2
   }));
-  bottomParticles = Array.from({ length: 180 }, () => ({
-    x: (Math.random() - 0.5) * 100,
-    y: (Math.random() - 0.5) * 100,
-    size: Math.random() * 30 + 20,
-    opacity: Math.random() * 0.35 + 0.25,
-    phase: Math.random() * Math.PI * 2
+  bottomParticles = Array.from({ length: 190 }, () => ({
+    size:    Math.random() * 38 + 26,
+    opacity: Math.random() * 0.38 + 0.28,
+    phase:   Math.random() * Math.PI * 2
   }));
 }
 
-function formatDisplayTime(seconds) {
-  if (seconds < 60) return Math.round(seconds) + "s";
-  return Math.round(seconds / 60) + "m";
+// ── TIME FORMATTING ───────────────────────────────────────────────────────
+
+function formatTime(s) {
+  s = Math.max(0, Math.round(s));
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return sec === 0 ? m + "m" : m + "m " + sec + "s";
 }
+
+function formatProgress() {
+  const elapsed = duration - timeLeft;
+  return formatTime(elapsed) + " of " + formatTime(duration);
+}
+
+// ── PATH BUILDERS ─────────────────────────────────────────────────────────
+// IMPORTANT: The neck edge (horizontal line between the two tips) is NOT
+// drawn. We only draw the outer perimeter + the two curved arms.
+// This leaves the neck center open / transparent.
+
+// Top half — outer boundary only (no bottom closing segment)
+function buildTopOuterPath() {
+  const { left, right, top, cx, r, neckHW, topShapeBottom, topBendStart } = S;
+  ctx.beginPath();
+  // TL iPhone corner → top edge → TR corner
+  ctx.moveTo(left + r, top);
+  ctx.lineTo(right - r, top);
+  ctx.arcTo(right, top, right, top + r, r);
+  // Right side straight to bend
+  ctx.lineTo(right, topBendStart);
+  // Right arm curves inward to right neck tip — STOPS HERE (no line across)
+  ctx.bezierCurveTo(right, topShapeBottom, cx + neckHW, topShapeBottom, cx + neckHW, topShapeBottom);
+  // PATH BREAK — move to left neck tip without drawing the neck segment
+  ctx.moveTo(cx - neckHW, topShapeBottom);
+  // Left arm curves back out to left side
+  ctx.bezierCurveTo(cx - neckHW, topShapeBottom, left, topShapeBottom, left, topBendStart);
+  // Left side straight to TL corner
+  ctx.lineTo(left, top + r);
+  ctx.arcTo(left, top, left + r, top, r);
+  // Don't closePath — we want an open shape for stroking
+}
+
+// Top half — closed path used only for clipping/filling
+function buildTopHalfPath() {
+  const { left, right, top, cx, r, neckHW, topShapeBottom, topBendStart } = S;
+  ctx.beginPath();
+  ctx.moveTo(left + r, top);
+  ctx.lineTo(right - r, top);
+  ctx.arcTo(right, top, right, top + r, r);
+  ctx.lineTo(right, topBendStart);
+  ctx.bezierCurveTo(right, topShapeBottom, cx + neckHW, topShapeBottom, cx + neckHW, topShapeBottom);
+  ctx.lineTo(cx - neckHW, topShapeBottom);
+  ctx.bezierCurveTo(cx - neckHW, topShapeBottom, left, topShapeBottom, left, topBendStart);
+  ctx.lineTo(left, top + r);
+  ctx.arcTo(left, top, left + r, top, r);
+  ctx.closePath();
+}
+
+// Bottom half — outer boundary only (no top closing segment)
+function buildBottomOuterPath() {
+  const { left, right, bottom, cx, r, neckHW, bottomShapeTop, bottomBendStart } = S;
+  ctx.beginPath();
+  // Right neck tip → curves out to right side
+  ctx.moveTo(cx + neckHW, bottomShapeTop);
+  ctx.bezierCurveTo(cx + neckHW, bottomShapeTop, right, bottomShapeTop, right, bottomBendStart);
+  // Right side straight to BR corner
+  ctx.lineTo(right, bottom - r);
+  ctx.arcTo(right, bottom, right - r, bottom, r);
+  // Bottom edge
+  ctx.lineTo(left + r, bottom);
+  // BL corner
+  ctx.arcTo(left, bottom, left, bottom - r, r);
+  // Left side straight up to bend
+  ctx.lineTo(left, bottomBendStart);
+  // Left arm curves inward to left neck tip — STOPS HERE
+  ctx.bezierCurveTo(left, bottomShapeTop, cx - neckHW, bottomShapeTop, cx - neckHW, bottomShapeTop);
+  // PATH BREAK — don't draw the top closing segment
+}
+
+// Bottom half — closed for clipping/filling
+function buildBottomHalfPath() {
+  const { left, right, bottom, cx, r, neckHW, bottomShapeTop, bottomBendStart } = S;
+  ctx.beginPath();
+  ctx.moveTo(cx - neckHW, bottomShapeTop);
+  ctx.lineTo(cx + neckHW, bottomShapeTop);
+  ctx.bezierCurveTo(cx + neckHW, bottomShapeTop, right, bottomShapeTop, right, bottomBendStart);
+  ctx.lineTo(right, bottom - r);
+  ctx.arcTo(right, bottom, right - r, bottom, r);
+  ctx.lineTo(left + r, bottom);
+  ctx.arcTo(left, bottom, left, bottom - r, r);
+  ctx.lineTo(left, bottomBendStart);
+  ctx.bezierCurveTo(left, bottomShapeTop, cx - neckHW, bottomShapeTop, cx - neckHW, bottomShapeTop);
+  ctx.closePath();
+}
+
+// ── BACKGROUND ────────────────────────────────────────────────────────────
+
+function drawBackground() {
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, width, height);
+  ctx.save();
+  buildTopHalfPath();
+  ctx.fillStyle = '#000000';
+  ctx.fill();
+  ctx.restore();
+  ctx.save();
+  buildBottomHalfPath();
+  ctx.fillStyle = '#000000';
+  ctx.fill();
+  ctx.restore();
+}
+
+// ── GLASS EDGES ───────────────────────────────────────────────────────────
+
+function strokeGlowEdge(pathFn) {
+  ctx.save();
+  // Wide outer bloom
+  pathFn();
+  ctx.shadowBlur  = 80;
+  ctx.shadowColor = 'rgba(180,220,255,0.50)';
+  ctx.strokeStyle = 'rgba(0,0,0,0)';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  // Medium halo
+  pathFn();
+  ctx.shadowBlur  = 42;
+  ctx.shadowColor = 'rgba(255,255,255,0.75)';
+  ctx.strokeStyle = 'rgba(0,0,0,0)';
+  ctx.lineWidth   = 2;
+  ctx.stroke();
+  // Bright crisp line
+  pathFn();
+  ctx.shadowBlur  = 14;
+  ctx.shadowColor = 'rgba(255,255,255,1.0)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+  ctx.lineWidth   = 1.6;
+  ctx.stroke();
+  // Hot white core
+  pathFn();
+  ctx.shadowBlur  = 3;
+  ctx.shadowColor = 'rgba(255,255,255,1.0)';
+  ctx.strokeStyle = 'rgba(255,255,255,1.0)';
+  ctx.lineWidth   = 0.7;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+// Fade neck curves: overdraw the arm curves with gradient fading to transparent at tip
+function drawNeckFade(side) {
+  // side = 'top' or 'bottom'
+  const isTop = side === 'top';
+  const { left, right, cx, neckHW } = S;
+  const bendStart   = isTop ? S.topBendStart    : S.bottomBendStart;
+  const neckY       = isTop ? S.topShapeBottom  : S.bottomShapeTop;
+  // gradient direction: from bend start toward neck tip
+  ctx.save();
+  ctx.lineWidth = 1.8;
+  ctx.lineCap   = 'round';
+
+  // Right arm
+  const grR = ctx.createLinearGradient(right, bendStart, cx + neckHW, neckY);
+  grR.addColorStop(0,   'rgba(255,255,255,0.95)');
+  grR.addColorStop(0.55,'rgba(255,255,255,0.25)');
+  grR.addColorStop(1,   'rgba(255,255,255,0.00)');
+  ctx.shadowBlur  = 18;
+  ctx.shadowColor = 'rgba(255,255,255,0.55)';
+  ctx.strokeStyle = grR;
+  ctx.beginPath();
+  ctx.moveTo(right, bendStart);
+  ctx.bezierCurveTo(right, neckY, cx + neckHW, neckY, cx + neckHW, neckY);
+  ctx.stroke();
+
+  // Left arm
+  const grL = ctx.createLinearGradient(left, bendStart, cx - neckHW, neckY);
+  grL.addColorStop(0,   'rgba(255,255,255,0.95)');
+  grL.addColorStop(0.55,'rgba(255,255,255,0.25)');
+  grL.addColorStop(1,   'rgba(255,255,255,0.00)');
+  ctx.strokeStyle = grL;
+  ctx.beginPath();
+  ctx.moveTo(left, bendStart);
+  ctx.bezierCurveTo(left, neckY, cx - neckHW, neckY, cx - neckHW, neckY);
+  ctx.stroke();
+
+  ctx.shadowBlur = 0;
+  ctx.restore();
+}
+
+function drawGlass() {
+  const { left, right } = S;
+
+  // Use the OUTER (broken-neck) path for stroking — no horizontal segment
+  strokeGlowEdge(buildTopOuterPath);
+  strokeGlowEdge(buildBottomOuterPath);
+
+  // Overdraw neck arms with fade to erase glow at tips
+  drawNeckFade('top');
+  drawNeckFade('bottom');
+
+  // Interior glass depth gradient
+  ctx.save();
+  buildTopHalfPath(); ctx.clip();
+  const gT = ctx.createLinearGradient(left, 0, right, 0);
+  gT.addColorStop(0, 'rgba(255,255,255,0.05)'); gT.addColorStop(0.04, 'rgba(255,255,255,0.12)');
+  gT.addColorStop(0.5, 'rgba(255,255,255,0.00)'); gT.addColorStop(0.96, 'rgba(255,255,255,0.10)');
+  gT.addColorStop(1, 'rgba(255,255,255,0.04)');
+  ctx.fillStyle = gT; ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  buildBottomHalfPath(); ctx.clip();
+  const gB = ctx.createLinearGradient(left, 0, right, 0);
+  gB.addColorStop(0, 'rgba(255,255,255,0.05)'); gB.addColorStop(0.04, 'rgba(255,255,255,0.12)');
+  gB.addColorStop(0.5, 'rgba(255,255,255,0.00)'); gB.addColorStop(0.96, 'rgba(255,255,255,0.10)');
+  gB.addColorStop(1, 'rgba(255,255,255,0.04)');
+  ctx.fillStyle = gB; ctx.fill();
+  ctx.restore();
+}
+
+// ── FOG / SNOW ────────────────────────────────────────────────────────────
+
+function drawTopFog(deltaTime) {
+  if (topFillLevel <= 0) return;
+  ctx.save();
+  buildTopHalfPath(); ctx.clip();
+  const { topShapeBottom, left, right } = S;
+  const fillH = topShapeBottom * 0.95 * topFillLevel;
+  const spanX = (right - left) * 0.46;
+  topParticles.forEach((p, i) => {
+    p.phase += deltaTime * 0.001;
+    const x     = cx + Math.sin(p.phase + i * 0.65) * spanX;
+    const baseY = topShapeBottom - (i / topParticles.length) * fillH;
+    const rg = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
+    rg.addColorStop(0, `rgba(255,255,255,${p.opacity})`);
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(x, baseY, p.size, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.restore();
+}
+
+function drawBottomFog(deltaTime) {
+  if (bottomFillLevel <= 0) return;
+  ctx.save();
+  buildBottomHalfPath(); ctx.clip();
+  const { bottomShapeTop, bottom, left, right } = S;
+  const fillH = (bottom - bottomShapeTop) * 0.95 * bottomFillLevel;
+  const spanX = (right - left) * 0.46;
+  bottomParticles.forEach((p, i) => {
+    p.phase += deltaTime * 0.0007;
+    const x     = cx + Math.sin(p.phase + i * 0.65) * spanX;
+    const baseY = bottom - (i / bottomParticles.length) * fillH;
+    const rg = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
+    rg.addColorStop(0, `rgba(255,255,255,${p.opacity * 0.9})`);
+    rg.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = rg;
+    ctx.beginPath(); ctx.arc(x, baseY, p.size, 0, Math.PI * 2); ctx.fill();
+  });
+  ctx.restore();
+}
+
+// Spawn shotgun-blast particles from the neck mouth.
+// They fire in all directions (but biased downward) and travel
+// all the way to the bottom of the screen — no clipping.
+function spawnFlowParticles() {
+  const { neckHW, topShapeBottom } = S;
+  for (let k = 0; k < 4; k++) {
+    // Random angle: full 360° but weighted downward
+    // Use a cone centered on straight-down (270° / -π/2), spread ±80°
+    const spread = (Math.random() - 0.5) * (Math.PI * 1.4); // ±126°
+    const angle  = Math.PI / 2 + spread;                    // base = downward
+    const speed  = Math.random() * 3.5 + 1.2;
+    flowParticles.push({
+      x:     cx + (Math.random() - 0.5) * neckHW * 1.8,
+      y:     topShapeBottom + 2,
+      vx:    Math.cos(angle) * speed,
+      vy:    Math.sin(angle) * speed,
+      size:  Math.random() * 14 + 7,
+      life:  1.0,
+      decay: 0.004 + Math.random() * 0.005,  // slow decay — they travel far
+    });
+  }
+}
+
+function drawFlowParticles() {
+  // NO clipping — particles travel freely through the gap and into the bottom half
+  gapParticles_ctx: {
+    flowParticles.forEach(p => {
+      p.x   += p.vx;
+      p.y   += p.vy;
+      p.vx  *= 0.985;
+      p.vy  += 0.06;   // slight gravity
+      p.life -= p.decay;
+      const op = Math.max(0, p.life * 0.5);
+      const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+      rg.addColorStop(0, `rgba(255,255,255,${op})`);
+      rg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = rg;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+    });
+  }
+  flowParticles = flowParticles.filter(p => p.life > 0 && p.y < height + 20);
+}
+
+// ── INTERACTION ───────────────────────────────────────────────────────────
 
 function handleStart(e) {
   const y = e.touches ? e.touches[0].clientY : e.clientY;
-  if (y < centerY) {
+  if (y < cy) {
     isDragging = true;
-    isRunning = false;
+    isRunning  = false;
     timeDisplay.classList.add('visible');
   }
 }
 
 function handleMove(e) {
-  if (!isDragging) return;
-  const y = e.touches ? e.touches[0].clientY : e.clientY;
-  const topTop = centerY - (glassHeight / 2);
-  const bulbHeight = glassHeight / 2;
-  let pct = 1 - ((y - topTop) / bulbHeight);
-  topFillLevel = Math.max(0.01, Math.min(1, pct));
-  bottomFillLevel = 0;
-  duration = MIN_TIME + (topFillLevel * (MAX_TIME - MIN_TIME));
-  timeLeft = duration;
-  timeDisplay.textContent = formatDisplayTime(duration);
+  if (!isDragging && !isRunning) return;
+
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+  if (isDragging) {
+    const { topShapeBottom } = S;
+    let pct = 1 - (clientY / topShapeBottom);
+    topFillLevel    = Math.max(0.01, Math.min(1, pct));
+    bottomFillLevel = 0;
+    duration        = MIN_TIME + (topFillLevel * (MAX_TIME - MIN_TIME));
+    timeLeft        = duration;
+    timeDisplay.textContent = formatTime(duration);
+    return;
+  }
+
+  // During run — detect hover on bottom half for progress display
+  if (isRunning) {
+    const inBottom = clientY > cy;
+    if (inBottom !== isHoveringBottom) {
+      isHoveringBottom = inBottom;
+      if (inBottom) {
+        progressDisplay.textContent = formatProgress();
+        progressDisplay.classList.add('visible');
+      } else {
+        progressDisplay.classList.remove('visible');
+      }
+    }
+    if (isHoveringBottom) {
+      progressDisplay.textContent = formatProgress();
+    }
+  }
 }
 
 function handleEnd() {
   if (isDragging) {
-    isDragging = false;
-    isRunning = true;
+    isDragging          = false;
+    isRunning           = true;
     initialTopFillLevel = topFillLevel;
     timeDisplay.classList.remove('visible');
     lastTime = performance.now();
   }
 }
 
+function handleLeave() {
+  if (isHoveringBottom) {
+    isHoveringBottom = false;
+    progressDisplay.classList.remove('visible');
+  }
+}
+
 interactionLayer.addEventListener('mousedown', handleStart);
 window.addEventListener('mousemove', handleMove);
 window.addEventListener('mouseup', handleEnd);
+window.addEventListener('mouseleave', handleLeave);
 interactionLayer.addEventListener('touchstart', handleStart, { passive: false });
-window.addEventListener('touchmove', (e) => { e.preventDefault(); handleMove(e); }, { passive: false });
-window.addEventListener('touchend', handleEnd);
+window.addEventListener('touchmove', e => { e.preventDefault(); handleMove(e); }, { passive: false });
+window.addEventListener('touchend', e => {
+  handleEnd();
+  // Hide progress on touch end
+  isHoveringBottom = false;
+  progressDisplay.classList.remove('visible');
+});
 
-// Build the hourglass path used for clipping and drawing
-function buildHourglassPath() {
-  const hw = glassWidth / 2;
-  const hh = glassHeight / 2;
-  const neck = 24;
-  ctx.moveTo(0, -hh - 5);
-  ctx.bezierCurveTo(hw + 10, -hh - 5, hw + 10, -neck, neck, 0);
-  ctx.bezierCurveTo(hw + 10, neck, hw + 10, hh + 5, 0, hh + 5);
-  ctx.bezierCurveTo(-hw - 10, hh + 5, -hw - 10, neck, -neck, 0);
-  ctx.bezierCurveTo(-hw - 10, -neck, -hw - 10, -hh - 5, 0, -hh - 5);
-}
-
-function fillGlassBlack() {
-  ctx.save();
-  ctx.translate(centerX, centerY);
-  ctx.beginPath();
-  buildHourglassPath();
-  ctx.fillStyle = '#000000';
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawGlass() {
-  ctx.save();
-  ctx.translate(centerX, centerY);
-
-  const hw = glassWidth / 2;
-  const hh = glassHeight / 2;
-  const neck = 24;
-
-  // ── Outer glow / bloom ──────────────────────────────────────────────
-  ctx.beginPath();
-  buildHourglassPath();
-  ctx.shadowBlur = 40;
-  ctx.shadowColor = 'rgba(180, 220, 255, 0.25)';
-  ctx.strokeStyle = 'rgba(255,255,255,0)';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-
-  // ── Main glass edge (bright white, sharp) ──────────────────────────
-  ctx.beginPath();
-  buildHourglassPath();
-  ctx.shadowBlur = 18;
-  ctx.shadowColor = 'rgba(255, 255, 255, 0.55)';
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
-  ctx.lineWidth = 1.8;
-  ctx.stroke();
-
-  // ── Inner specular highlight (left edge) ───────────────────────────
-  ctx.shadowBlur = 0;
-  ctx.beginPath();
-  ctx.moveTo(-hw * 0.55, -hh + 20);
-  ctx.bezierCurveTo(-hw * 0.75, -hh * 0.5, -hw * 0.85, -neck * 2, -neck * 0.7, 0);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
-  ctx.lineWidth = 3.5;
-  ctx.lineCap = 'round';
-  ctx.stroke();
-
-  // ── Inner specular highlight (right edge, dimmer) ──────────────────
-  ctx.beginPath();
-  ctx.moveTo(hw * 0.55, -hh + 20);
-  ctx.bezierCurveTo(hw * 0.75, -hh * 0.5, hw * 0.85, -neck * 2, neck * 0.7, 0);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
-
-  // ── Same specular for bottom bulb ──────────────────────────────────
-  ctx.beginPath();
-  ctx.moveTo(-neck * 0.7, 0);
-  ctx.bezierCurveTo(-hw * 0.85, neck * 2, -hw * 0.75, hh * 0.5, -hw * 0.55, hh - 20);
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
-  ctx.lineWidth = 3.5;
-  ctx.stroke();
-
-  // ── Faint interior glass gradient (depth) ─────────────────────────
-  ctx.beginPath();
-  buildHourglassPath();
-  const grad = ctx.createLinearGradient(-hw, 0, hw, 0);
-  grad.addColorStop(0,   'rgba(255,255,255,0.04)');
-  grad.addColorStop(0.08,'rgba(255,255,255,0.10)');
-  grad.addColorStop(0.5, 'rgba(255,255,255,0.00)');
-  grad.addColorStop(0.92,'rgba(255,255,255,0.07)');
-  grad.addColorStop(1,   'rgba(255,255,255,0.03)');
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // ── Neck pinch — tiny bright dot at center ────────────────────────
-  const neckGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, neck * 1.2);
-  neckGrad.addColorStop(0,   'rgba(255,255,255,0.18)');
-  neckGrad.addColorStop(1,   'rgba(255,255,255,0)');
-  ctx.fillStyle = neckGrad;
-  ctx.beginPath();
-  ctx.arc(0, 0, neck * 1.2, 0, Math.PI * 2);
-  ctx.fill();
-
-  ctx.restore();
-}
-
-function drawTopFog(deltaTime) {
-  if (topFillLevel <= 0) return;
-  ctx.save();
-  ctx.translate(centerX, centerY);
-  const hw = glassWidth / 2;
-  const hh = glassHeight / 2;
-  const neck = 24;
-
-  // Clip to top bulb
-  ctx.beginPath();
-  ctx.moveTo(0, -hh - 5);
-  ctx.bezierCurveTo(hw + 10, -hh - 5, hw + 10, -neck, neck, 0);
-  ctx.lineTo(-neck, 0);
-  ctx.bezierCurveTo(-hw - 10, -neck, -hw - 10, -hh - 5, 0, -hh - 5);
-  ctx.clip();
-
-  const fillHeight = (hh * 0.95) * topFillLevel;
-  topParticles.forEach((p, i) => {
-    p.phase += deltaTime * 0.001;
-    const x = Math.sin(p.phase + i) * (hw * 0.5);
-    const baseY = -((i / topParticles.length) * fillHeight);
-    const radGrad = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
-    radGrad.addColorStop(0, `rgba(255, 255, 255, ${p.opacity})`);
-    radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    ctx.fillStyle = radGrad;
-    ctx.beginPath();
-    ctx.arc(x, baseY, p.size, 0, Math.PI * 2);
-    ctx.fill();
-  });
-
-  ctx.restore();
-}
-
-function drawBottomFog(deltaTime) {
-  ctx.save();
-  ctx.translate(centerX, centerY);
-  const hw = glassWidth / 2;
-  const hh = glassHeight / 2;
-  const neck = 24;
-
-  // Clip to bottom bulb
-  ctx.beginPath();
-  ctx.moveTo(-neck, 0);
-  ctx.bezierCurveTo(-hw - 10, neck, -hw - 10, hh + 5, 0, hh + 5);
-  ctx.bezierCurveTo(hw + 10, hh + 5, hw + 10, neck, neck, 0);
-  ctx.clip();
-
-  if (bottomFillLevel > 0) {
-    const fillHeight = (hh * 0.95) * bottomFillLevel;
-    bottomParticles.forEach((p, i) => {
-      p.phase += deltaTime * 0.0007;
-      const x = Math.sin(p.phase + i) * (hw * 0.6);
-      const baseY = hh - ((i / bottomParticles.length) * fillHeight);
-      const radGrad = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
-      radGrad.addColorStop(0, `rgba(255, 255, 255, ${p.opacity * 0.9})`);
-      radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = radGrad;
-      ctx.beginPath();
-      ctx.arc(x, baseY, p.size, 0, Math.PI * 2);
-      ctx.fill();
-    });
+// Touch hold on bottom half shows progress
+interactionLayer.addEventListener('touchstart', e => {
+  const y = e.touches[0].clientY;
+  if (isRunning && y > cy) {
+    isHoveringBottom = true;
+    progressDisplay.textContent = formatProgress();
+    progressDisplay.classList.add('visible');
   }
+}, { passive: false });
 
-  // Spray from neck
-  if (isRunning && topFillLevel > 0) {
-    for (let k = 0; k < 2; k++) {
-      sprayParticles.push({
-        x: (Math.random() - 0.5) * neck,
-        y: 0,
-        vx: (Math.random() - 0.5) * 8,
-        vy: Math.random() * 5 + 4,
-        size: Math.random() * 15 + 10,
-        life: 1.0
-      });
-    }
-  }
-  sprayParticles.forEach((p) => {
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vx *= 0.96;
-    p.vy += 0.1;
-    p.life -= 0.01;
-    const op = Math.max(0, p.life * 0.4);
-    const radGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
-    radGrad.addColorStop(0, `rgba(255, 255, 255, ${op})`);
-    radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
-    ctx.fillStyle = radGrad;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-    ctx.fill();
-  });
-  sprayParticles = sprayParticles.filter(p => p.life > 0 && p.y < hh);
-
-  ctx.restore();
-}
+// ── ANIMATION LOOP ────────────────────────────────────────────────────────
 
 function animate(now) {
   const deltaTime = now - (lastTime || now);
@@ -357,30 +552,32 @@ function animate(now) {
   if (isRunning && timeLeft > 0) {
     const step = deltaTime / 1000;
     timeLeft -= step;
-    // Drain top by exactly initialTopFillLevel over the full duration
-    const rate = (step / duration) * initialTopFillLevel;
-    topFillLevel = Math.max(0, topFillLevel - rate);
+    const rate      = (step / duration) * initialTopFillLevel;
+    topFillLevel    = Math.max(0, topFillLevel    - rate);
     bottomFillLevel = Math.min(1, bottomFillLevel + rate);
     if (timeLeft <= 0) {
-      isRunning = false;
-      timeLeft = 0;
+      isRunning    = false;
+      timeLeft     = 0;
       topFillLevel = 0;
-      bottomFillLevel = Math.min(1, bottomFillLevel + topFillLevel);
+      progressDisplay.classList.remove('visible');
     }
+    if (topFillLevel > 0) spawnFlowParticles();
   }
 
-  // 1. Pure black canvas
-  ctx.fillStyle = '#000';
+  // ── 1. Pure black ─────────────────────────────────────────────────
+  ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, width, height);
+  ctx.save(); buildTopHalfPath();    ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
+  ctx.save(); buildBottomHalfPath(); ctx.fillStyle = '#000000'; ctx.fill(); ctx.restore();
 
-  // 2. Fill glass interior with pure black (before fog)
-  fillGlassBlack();
-
-  // 3. Draw fog layers (clipped inside glass)
+  // ── 2. Fog inside bulbs ───────────────────────────────────────────
   drawTopFog(deltaTime);
   drawBottomFog(deltaTime);
 
-  // 4. Draw premium glass edges on top of everything
+  // ── 3. Flow particles — unclipped, travel full height ────────────
+  drawFlowParticles();
+
+  // ── 4. Glass edges on top ─────────────────────────────────────────
   drawGlass();
 
   requestAnimationFrame(animate);
@@ -390,4 +587,3 @@ init();
 </script>
 </body>
 </html>
-

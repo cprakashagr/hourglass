@@ -83,7 +83,7 @@ const interactionLayer = document.getElementById('interaction-layer');
 const timeDisplay     = document.getElementById('time-display');
 const progressDisplay = document.getElementById('progress-display');
 
-const MIN_TIME = 10;
+const MIN_TIME = 300;
 const MAX_TIME = 3600;
 
 let width, height, cx, cy;
@@ -303,44 +303,62 @@ function strokeGlowEdge(pathFn) {
 }
 
 // Fade neck curves: overdraw the arm curves with gradient fading to transparent at tip
+
 function drawNeckFade(side) {
-  // side = 'top' or 'bottom'
   const isTop = side === 'top';
   const { left, right, cx, neckHW } = S;
-  const bendStart   = isTop ? S.topBendStart    : S.bottomBendStart;
-  const neckY       = isTop ? S.topShapeBottom  : S.bottomShapeTop;
-  // gradient direction: from bend start toward neck tip
+  const bendStart = isTop ? S.topBendStart : S.bottomBendStart;
+  const neckY     = isTop ? S.topShapeBottom : S.bottomShapeTop;
+
   ctx.save();
-  ctx.lineWidth = 1.8;
-  ctx.lineCap   = 'round';
+  ctx.lineCap = 'round';
+
+  // Helper to draw one arm
+  function drawArm(fromX, tipX) {
+
+    // Multi-pass fade with shrinking width
+    for (let i = 0; i < 3; i++) {
+      const t = i / 3;
+
+      const grad = ctx.createLinearGradient(fromX, bendStart, tipX, neckY);
+      grad.addColorStop(0, `rgba(255,255,255,${0.95 - t * 0.5})`);
+      grad.addColorStop(0.7, `rgba(255,255,255,${0.25 - t * 0.2})`);
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+
+      ctx.lineWidth   = 2.2 - i * 0.7;   // progressively thinner
+      ctx.shadowBlur  = 16 - i * 5;      // progressively softer glow
+      ctx.shadowColor = 'rgba(255,255,255,0.6)';
+      ctx.strokeStyle = grad;
+
+      ctx.beginPath();
+      ctx.moveTo(fromX, bendStart);
+      ctx.bezierCurveTo(fromX, neckY, tipX, neckY, tipX, neckY);
+      ctx.stroke();
+    }
+
+    // 🔥 Soft eraser at the tip to remove leftover glow
+    const erase = ctx.createRadialGradient(tipX, neckY, 0, tipX, neckY, 30);
+    erase.addColorStop(0, 'rgba(0,0,0,0.8)');
+    erase.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.globalCompositeOperation = 'destination-out';
+    ctx.fillStyle = erase;
+    ctx.beginPath();
+    ctx.arc(tipX, neckY, 30, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalCompositeOperation = 'source-over';
+  }
 
   // Right arm
-  const grR = ctx.createLinearGradient(right, bendStart, cx + neckHW, neckY);
-  grR.addColorStop(0,   'rgba(255,255,255,0.95)');
-  grR.addColorStop(0.55,'rgba(255,255,255,0.25)');
-  grR.addColorStop(1,   'rgba(255,255,255,0.00)');
-  ctx.shadowBlur  = 18;
-  ctx.shadowColor = 'rgba(255,255,255,0.55)';
-  ctx.strokeStyle = grR;
-  ctx.beginPath();
-  ctx.moveTo(right, bendStart);
-  ctx.bezierCurveTo(right, neckY, cx + neckHW, neckY, cx + neckHW, neckY);
-  ctx.stroke();
+  drawArm(right, cx + neckHW);
 
   // Left arm
-  const grL = ctx.createLinearGradient(left, bendStart, cx - neckHW, neckY);
-  grL.addColorStop(0,   'rgba(255,255,255,0.95)');
-  grL.addColorStop(0.55,'rgba(255,255,255,0.25)');
-  grL.addColorStop(1,   'rgba(255,255,255,0.00)');
-  ctx.strokeStyle = grL;
-  ctx.beginPath();
-  ctx.moveTo(left, bendStart);
-  ctx.bezierCurveTo(left, neckY, cx - neckHW, neckY, cx - neckHW, neckY);
-  ctx.stroke();
+  drawArm(left, cx - neckHW);
 
-  ctx.shadowBlur = 0;
   ctx.restore();
 }
+
+
 
 function drawGlass() {
   const { left, right } = S;

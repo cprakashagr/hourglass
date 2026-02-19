@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Digital Fog Hourglass</title>
+  <style>
+    body, html {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background-color: #000;
+      overflow: hidden;
+      display: flex; justify-content: center; align-items: center;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    }
+    #canvas-container {
+      position: relative;
+      width: 100vw; height: 100vh;
+      background: #000;
+      display: flex; justify-content: center; align-items: center;
+    }
+    canvas { display: block; }
+    #time-display {
+      position: absolute;
+      color: white;
+      font-size: 2.2rem;
+      font-weight: 200;
+      letter-spacing: 1px;
+      opacity: 0;
+      transition: opacity 0.4s ease, transform 0.4s ease;
+      pointer-events: none;
+      text-shadow: 0 0 20px rgba(255,255,255,0.4);
+      z-index: 20;
+      text-align: center;
+    }
+    #time-display.visible { opacity: 0.9; }
+    #interaction-layer {
+      position: absolute; top: 0; left: 0;
+      width: 100%; height: 100%; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+<div id="canvas-container">
+  <div id="time-display">10s</div>
+  <canvas id="glassCanvas"></canvas>
+  <div id="interaction-layer"></div>
+</div>
+<script>
+const canvas = document.getElementById('glassCanvas');
+const ctx = canvas.getContext('2d');
+const interactionLayer = document.getElementById('interaction-layer');
+const timeDisplay = document.getElementById('time-display');
+
+const MIN_TIME = 10;
+const MAX_TIME = 3600;
+
+let width, height, centerX, centerY, glassWidth, glassHeight;
+let isDragging = false;
+let isRunning = false;
+let duration = 60;
+let timeLeft = 0;
+let topFillLevel = 0.3;
+let initialTopFillLevel = 0.3;
+let bottomFillLevel = 0;
+let lastTime = 0;
+let topParticles = [];
+let bottomParticles = [];
+let sprayParticles = [];
+
+function init() {
+  resize();
+  createParticles();
+  requestAnimationFrame(animate);
+}
+
+function resize() {
+  width = window.innerWidth;
+  height = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const containerPadding = 100;
+  glassHeight = Math.min(height - containerPadding, 500);
+  glassWidth = glassHeight * 0.65;
+  canvas.width = width * dpr;
+  canvas.height = height * dpr;
+  canvas.style.width = width + 'px';
+  canvas.style.height = height + 'px';
+  ctx.scale(dpr, dpr);
+  centerX = width / 2;
+  centerY = height / 2;
+  timeDisplay.style.top = (centerY - glassHeight / 4 - 20) + 'px';
+}
+
+window.addEventListener('resize', resize);
+
+function createParticles() {
+  topParticles = Array.from({ length: 150 }, () => ({
+    x: (Math.random() - 0.5) * 100,
+    y: (Math.random() - 0.5) * 100,
+    size: Math.random() * 25 + 20,
+    opacity: Math.random() * 0.35 + 0.25,
+    phase: Math.random() * Math.PI * 2
+  }));
+  bottomParticles = Array.from({ length: 180 }, () => ({
+    x: (Math.random() - 0.5) * 100,
+    y: (Math.random() - 0.5) * 100,
+    size: Math.random() * 30 + 20,
+    opacity: Math.random() * 0.35 + 0.25,
+    phase: Math.random() * Math.PI * 2
+  }));
+}
+
+function formatDisplayTime(seconds) {
+  if (seconds < 60) return Math.round(seconds) + "s";
+  return Math.round(seconds / 60) + "m";
+}
+
+function handleStart(e) {
+  const y = e.touches ? e.touches[0].clientY : e.clientY;
+  if (y < centerY) {
+    isDragging = true;
+    isRunning = false;
+    timeDisplay.classList.add('visible');
+  }
+}
+
+function handleMove(e) {
+  if (!isDragging) return;
+  const y = e.touches ? e.touches[0].clientY : e.clientY;
+  const topTop = centerY - (glassHeight / 2);
+  const bulbHeight = glassHeight / 2;
+  let pct = 1 - ((y - topTop) / bulbHeight);
+  topFillLevel = Math.max(0.01, Math.min(1, pct));
+  bottomFillLevel = 0;
+  duration = MIN_TIME + (topFillLevel * (MAX_TIME - MIN_TIME));
+  timeLeft = duration;
+  timeDisplay.textContent = formatDisplayTime(duration);
+}
+
+function handleEnd() {
+  if (isDragging) {
+    isDragging = false;
+    isRunning = true;
+    initialTopFillLevel = topFillLevel;
+    timeDisplay.classList.remove('visible');
+    lastTime = performance.now();
+  }
+}
+
+interactionLayer.addEventListener('mousedown', handleStart);
+window.addEventListener('mousemove', handleMove);
+window.addEventListener('mouseup', handleEnd);
+interactionLayer.addEventListener('touchstart', handleStart, { passive: false });
+window.addEventListener('touchmove', (e) => { e.preventDefault(); handleMove(e); }, { passive: false });
+window.addEventListener('touchend', handleEnd);
+
+// Build the hourglass path used for clipping and drawing
+function buildHourglassPath() {
+  const hw = glassWidth / 2;
+  const hh = glassHeight / 2;
+  const neck = 24;
+  ctx.moveTo(0, -hh - 5);
+  ctx.bezierCurveTo(hw + 10, -hh - 5, hw + 10, -neck, neck, 0);
+  ctx.bezierCurveTo(hw + 10, neck, hw + 10, hh + 5, 0, hh + 5);
+  ctx.bezierCurveTo(-hw - 10, hh + 5, -hw - 10, neck, -neck, 0);
+  ctx.bezierCurveTo(-hw - 10, -neck, -hw - 10, -hh - 5, 0, -hh - 5);
+}
+
+function fillGlassBlack() {
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  ctx.beginPath();
+  buildHourglassPath();
+  ctx.fillStyle = '#000000';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawGlass() {
+  ctx.save();
+  ctx.translate(centerX, centerY);
+
+  const hw = glassWidth / 2;
+  const hh = glassHeight / 2;
+  const neck = 24;
+
+  // ── Outer glow / bloom ──────────────────────────────────────────────
+  ctx.beginPath();
+  buildHourglassPath();
+  ctx.shadowBlur = 40;
+  ctx.shadowColor = 'rgba(180, 220, 255, 0.25)';
+  ctx.strokeStyle = 'rgba(255,255,255,0)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // ── Main glass edge (bright white, sharp) ──────────────────────────
+  ctx.beginPath();
+  buildHourglassPath();
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = 'rgba(255, 255, 255, 0.55)';
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.92)';
+  ctx.lineWidth = 1.8;
+  ctx.stroke();
+
+  // ── Inner specular highlight (left edge) ───────────────────────────
+  ctx.shadowBlur = 0;
+  ctx.beginPath();
+  ctx.moveTo(-hw * 0.55, -hh + 20);
+  ctx.bezierCurveTo(-hw * 0.75, -hh * 0.5, -hw * 0.85, -neck * 2, -neck * 0.7, 0);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+  ctx.lineWidth = 3.5;
+  ctx.lineCap = 'round';
+  ctx.stroke();
+
+  // ── Inner specular highlight (right edge, dimmer) ──────────────────
+  ctx.beginPath();
+  ctx.moveTo(hw * 0.55, -hh + 20);
+  ctx.bezierCurveTo(hw * 0.75, -hh * 0.5, hw * 0.85, -neck * 2, neck * 0.7, 0);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.10)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // ── Same specular for bottom bulb ──────────────────────────────────
+  ctx.beginPath();
+  ctx.moveTo(-neck * 0.7, 0);
+  ctx.bezierCurveTo(-hw * 0.85, neck * 2, -hw * 0.75, hh * 0.5, -hw * 0.55, hh - 20);
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.18)';
+  ctx.lineWidth = 3.5;
+  ctx.stroke();
+
+  // ── Faint interior glass gradient (depth) ─────────────────────────
+  ctx.beginPath();
+  buildHourglassPath();
+  const grad = ctx.createLinearGradient(-hw, 0, hw, 0);
+  grad.addColorStop(0,   'rgba(255,255,255,0.04)');
+  grad.addColorStop(0.08,'rgba(255,255,255,0.10)');
+  grad.addColorStop(0.5, 'rgba(255,255,255,0.00)');
+  grad.addColorStop(0.92,'rgba(255,255,255,0.07)');
+  grad.addColorStop(1,   'rgba(255,255,255,0.03)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // ── Neck pinch — tiny bright dot at center ────────────────────────
+  const neckGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, neck * 1.2);
+  neckGrad.addColorStop(0,   'rgba(255,255,255,0.18)');
+  neckGrad.addColorStop(1,   'rgba(255,255,255,0)');
+  ctx.fillStyle = neckGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, neck * 1.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawTopFog(deltaTime) {
+  if (topFillLevel <= 0) return;
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  const hw = glassWidth / 2;
+  const hh = glassHeight / 2;
+  const neck = 24;
+
+  // Clip to top bulb
+  ctx.beginPath();
+  ctx.moveTo(0, -hh - 5);
+  ctx.bezierCurveTo(hw + 10, -hh - 5, hw + 10, -neck, neck, 0);
+  ctx.lineTo(-neck, 0);
+  ctx.bezierCurveTo(-hw - 10, -neck, -hw - 10, -hh - 5, 0, -hh - 5);
+  ctx.clip();
+
+  const fillHeight = (hh * 0.95) * topFillLevel;
+  topParticles.forEach((p, i) => {
+    p.phase += deltaTime * 0.001;
+    const x = Math.sin(p.phase + i) * (hw * 0.5);
+    const baseY = -((i / topParticles.length) * fillHeight);
+    const radGrad = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
+    radGrad.addColorStop(0, `rgba(255, 255, 255, ${p.opacity})`);
+    radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = radGrad;
+    ctx.beginPath();
+    ctx.arc(x, baseY, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  ctx.restore();
+}
+
+function drawBottomFog(deltaTime) {
+  ctx.save();
+  ctx.translate(centerX, centerY);
+  const hw = glassWidth / 2;
+  const hh = glassHeight / 2;
+  const neck = 24;
+
+  // Clip to bottom bulb
+  ctx.beginPath();
+  ctx.moveTo(-neck, 0);
+  ctx.bezierCurveTo(-hw - 10, neck, -hw - 10, hh + 5, 0, hh + 5);
+  ctx.bezierCurveTo(hw + 10, hh + 5, hw + 10, neck, neck, 0);
+  ctx.clip();
+
+  if (bottomFillLevel > 0) {
+    const fillHeight = (hh * 0.95) * bottomFillLevel;
+    bottomParticles.forEach((p, i) => {
+      p.phase += deltaTime * 0.0007;
+      const x = Math.sin(p.phase + i) * (hw * 0.6);
+      const baseY = hh - ((i / bottomParticles.length) * fillHeight);
+      const radGrad = ctx.createRadialGradient(x, baseY, 0, x, baseY, p.size);
+      radGrad.addColorStop(0, `rgba(255, 255, 255, ${p.opacity * 0.9})`);
+      radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = radGrad;
+      ctx.beginPath();
+      ctx.arc(x, baseY, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    });
+  }
+
+  // Spray from neck
+  if (isRunning && topFillLevel > 0) {
+    for (let k = 0; k < 2; k++) {
+      sprayParticles.push({
+        x: (Math.random() - 0.5) * neck,
+        y: 0,
+        vx: (Math.random() - 0.5) * 8,
+        vy: Math.random() * 5 + 4,
+        size: Math.random() * 15 + 10,
+        life: 1.0
+      });
+    }
+  }
+  sprayParticles.forEach((p) => {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vx *= 0.96;
+    p.vy += 0.1;
+    p.life -= 0.01;
+    const op = Math.max(0, p.life * 0.4);
+    const radGrad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.size);
+    radGrad.addColorStop(0, `rgba(255, 255, 255, ${op})`);
+    radGrad.addColorStop(1, 'rgba(255, 255, 255, 0)');
+    ctx.fillStyle = radGrad;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+  });
+  sprayParticles = sprayParticles.filter(p => p.life > 0 && p.y < hh);
+
+  ctx.restore();
+}
+
+function animate(now) {
+  const deltaTime = now - (lastTime || now);
+  lastTime = now;
+
+  if (isRunning && timeLeft > 0) {
+    const step = deltaTime / 1000;
+    timeLeft -= step;
+    // Drain top by exactly initialTopFillLevel over the full duration
+    const rate = (step / duration) * initialTopFillLevel;
+    topFillLevel = Math.max(0, topFillLevel - rate);
+    bottomFillLevel = Math.min(1, bottomFillLevel + rate);
+    if (timeLeft <= 0) {
+      isRunning = false;
+      timeLeft = 0;
+      topFillLevel = 0;
+      bottomFillLevel = Math.min(1, bottomFillLevel + topFillLevel);
+    }
+  }
+
+  // 1. Pure black canvas
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, width, height);
+
+  // 2. Fill glass interior with pure black (before fog)
+  fillGlassBlack();
+
+  // 3. Draw fog layers (clipped inside glass)
+  drawTopFog(deltaTime);
+  drawBottomFog(deltaTime);
+
+  // 4. Draw premium glass edges on top of everything
+  drawGlass();
+
+  requestAnimationFrame(animate);
+}
+
+init();
+</script>
+</body>
+</html>
+
